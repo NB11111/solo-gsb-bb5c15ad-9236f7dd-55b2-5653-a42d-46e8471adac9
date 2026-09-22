@@ -1,0 +1,27 @@
+{
+  "name": "choir-sightline-checker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "合唱视线遮挡检查台：拖放指挥与圆形站位，实时检查视线遮挡（相切/重合/共线精确处理）",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch server/src/index.ts",
+    "dev:client": "vite client",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "vite build client",
+    "build:server": "esbuild server/src/index.ts --bundle --platform=node --target=node20 --format=esm --banner:js=\"import{createRequire}from'node:module';const require=createRequire(import.meta.url);\" --outfile=server/dist/index.js",
+    "start": "node server/dist/index.js",
+    "test": "node --import tsx --test shared/geometry.test.ts",
+    "typecheck": "tsc -p server/tsconfig.json && tsc -p client/tsconfig.json"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "esbuild": "^0.24.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
