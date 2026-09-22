@@ -1,7 +1,15 @@
-import type { Analysis, Scene, SingerLOS, UnblockCandidate } from '../../shared/geometry';
+import type {
+  Analysis,
+  ConductorCandidate,
+  ConductorHeatmap,
+  Scene,
+  SingerLOS,
+  UnblockCandidate,
+} from '../../shared/geometry';
 import { identityColor } from './colors';
 import { CONDUCTOR_ID } from './Stage';
 import { UnblockPanel, type UnblockState } from './UnblockPanel';
+import { HeatmapPanel, type HeatPreview, type HeatStatus } from './HeatmapPanel';
 
 interface SidebarProps {
   scene: Scene;
@@ -15,6 +23,15 @@ interface SidebarProps {
   onUnblockSearch: () => void;
   onUnblockPreview: (index: number | null) => void;
   onUnblockApply: (candidate: UnblockCandidate) => void;
+  heatMode: boolean;
+  heatmap: ConductorHeatmap | null;
+  heatStatus: HeatStatus;
+  heatCellSize: number;
+  onHeatCellSize: (size: number) => void;
+  heatPreview: HeatPreview | null;
+  onHeatPreview: (p: HeatPreview | null) => void;
+  onHeatApply: (c: ConductorCandidate) => void;
+  onCloseHeat: () => void;
 }
 
 const STATUS_LABEL: Record<SingerLOS['status'], string> = {
@@ -52,6 +69,20 @@ export function Sidebar(props: SidebarProps) {
         {summary.degenerate > 0 && <span className="stat degenerate">退化 {summary.degenerate}</span>}
         <span className="stat total">共 {summary.total} 人</span>
       </section>
+
+      {props.heatMode && (
+        <HeatmapPanel
+          scene={scene}
+          heatmap={props.heatmap}
+          status={props.heatStatus}
+          cellSize={props.heatCellSize}
+          onCellSize={props.onHeatCellSize}
+          preview={props.heatPreview}
+          onPreview={props.onHeatPreview}
+          onApply={props.onHeatApply}
+          onClose={props.onCloseHeat}
+        />
+      )}
 
       {analysis.warnings.length > 0 && (
         <section className="panel warnings">

@@ -1,10 +1,11 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   analyzeScene,
   findUnblockCandidates,
   serializeScene,
   validateScene,
   type Analysis,
+  type ConductorHeatmap,
   type Scene,
   type UnblockCandidate,
 } from '../../shared/geometry';
@@ -12,6 +13,7 @@ import { PRESETS, defaultScene } from './presets';
 import { Stage, CONDUCTOR_ID } from './Stage';
 import { Sidebar } from './Sidebar';
 import { GraphView } from './GraphView';
+import type { HeatPreview, HeatStatus } from './HeatmapPanel';
 import type { UnblockState } from './UnblockPanel';
 
 interface Notice {
@@ -38,7 +40,55 @@ export default function App() {
   const [unblock, setUnblock] = useState<UnblockState | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ---- 指挥站位热区模式 ----
+  const [heatMode, setHeatMode] = useState(false);
+  const [heatmap, setHeatmap] = useState<ConductorHeatmap | null>(null);
+  const [heatStatus, setHeatStatus] = useState<HeatStatus>('ready');
+  const [heatCellSize, setHeatCellSize] = useState(0.25);
+  const [heatPreview, setHeatPreview] = useState<HeatPreview | null>(null);
+  const heatSeqRef = useRef(0);
+
   const analysis: Analysis = useMemo(() => analyzeScene(scene), [scene]);
+
+  // 热区放在 Worker 中计算：场景每一次编辑后立即重算（0.25 m 网格 × 全部视线），
+  // 结果按序号比对丢弃过期响应；空场景在主线程直接清空，给出明确提示。
+  useEffect(() => {
+    if (!heatMode) return;
+    if (scene.singers.length === 0) {
+      setHeatPreview(null);
+      setHeatmap({
+        region: { minX: -1, maxX: scene.stage.width + 1, minY: -2.8, maxY: 0 },
+        gridStep: 0.25,
+        total: 0,
+        points: [],
+        candidates: [],
+        bestScore: 0,
+      });
+      setHeatStatus('ready');
+      return;
+    }
+    const seq = ++heatSeqRef.current;
+    setHeatStatus('computing');
+    const worker = new Worker(new URL('./heatmap.worker.ts', import.meta.url), { type: 'module' });
+    worker.onmessage = (e: MessageEvent<{ seq: number; heatmap: ConductorHeatmap }>) => {
+      if (e.data.seq !== seq) return;
+      setHeatmap(e.data.heatmap);
+      setHeatStatus('ready');
+      worker.terminate();
+    };
+    worker.onerror = () => {
+      worker.terminate();
+      setHeatStatus('ready');
+    };
+    worker.postMessage({ seq, scene });
+    return () => worker.terminate();
+  }, [heatMode, scene]);
+
+  const toggleHeatMode = () => {
+    // 退出热区模式时收起预览与候选
+    if (heatMode) setHeatPreview(null);
+    setHeatMode((m) => !m);
+  };
 
   /** 使自动解遮挡结果过期（场景被编辑过，候选不再可信）。 */
   const markSceneChanged = () => {
@@ -82,6 +132,20 @@ export default function App() {
   const moveConductor = (x: number, y: number) => {
     setScene((sc) => ({ ...sc, conductor: { x, y } }));
     markSceneChanged();
+  };
+
+  // ---- 指挥站位热区：应用候选（仅此时才真正移动指挥）----
+  const applyHeatPoint = (p: { x: number; y: number; clear?: number; tangent?: number; blocked?: number; degenerate?: number }) => {
+    moveConductor(Number(p.x.toFixed(3)), Number(p.y.toFixed(3)));
+    setHeatPreview(null);
+    const detail =
+      p.clear !== undefined
+        ? `通畅 ${p.clear} / 相切 ${p.tangent} / 遮挡 ${p.blocked}${p.degenerate ? ` / 退化 ${p.degenerate}` : ''}`
+        : '热区正在重算';
+    setNotice({
+      kind: 'success',
+      text: `已应用指挥位置 (${p.x.toFixed(2)}, ${p.y.toFixed(2)})：${detail}。`,
+    });
   };
 
   const changeRadius = (id: string, radius: number) =>
@@ -231,12 +295,30 @@ export default function App() {
         }
       : null;
 
+  // 热区舞台渲染数据（heatMode 且已有热区结果时显示）
+  const heatStageProp =
+    heatMode && heatmap
+      ? {
+          heatmap,
+          cellSize: heatCellSize,
+          preview: heatPreview,
+          onPreviewCandidate: setHeatPreview,
+        }
+      : null;
+
   return (
     <div className="app">
       <header className="toolbar">
         <h1>合唱视线遮挡检查台</h1>
         <div className="actions">
           <button onClick={addSingerAuto}>＋ 添加演唱者</button>
+          <button
+            className={heatMode ? 'heat-toggle active' : 'heat-toggle'}
+            onClick={toggleHeatMode}
+            title="在舞台前方按 0.25 m 网格模拟指挥位置并推荐最佳站位"
+          >
+            🧭 指挥站位热区
+          </button>
           <select defaultValue="" onChange={(e) => e.target.value && loadPreset(e.target.value)}>
             <option value="" disabled>
               载入预设…
@@ -281,6 +363,7 @@ export default function App() {
               analysis={analysis}
               selectedId={selectedId}
               preview={preview}
+              heat={heatStageProp}
               onSelect={selectId}
               onMoveSinger={moveSinger}
               onMoveConductor={moveConductor}
@@ -288,8 +371,38 @@ export default function App() {
               onRadiusChange={changeRadius}
               onPreviewCandidate={previewUnblock}
             />
-            {selectedId === CONDUCTOR_ID && (
+            {selectedId === CONDUCTOR_ID && !heatPreview && (
               <div className="conductor-hint">已选中指挥：拖动调整位置，点击空白处取消选择。</div>
+            )}
+            {heatPreview && (
+              <div className="heat-preview-bar">
+                正在预览候选指挥位置 ({heatPreview.x.toFixed(2)}, {heatPreview.y.toFixed(2)}) 的全部视线 ——
+                指挥尚未移动，确认后再应用。
+                <button
+                  className="heat-apply-btn"
+                  onClick={() => {
+                    if (!heatmap) return;
+                    // 优先用候选明细；编辑后预览点掉出前 3 时退回网格点明细
+                    const c =
+                      heatmap.candidates.find(
+                        (q) => Math.abs(q.x - heatPreview.x) < 1e-9 && Math.abs(q.y - heatPreview.y) < 1e-9,
+                      ) ??
+                      heatmap.points.find(
+                        (q) => Math.abs(q.x - heatPreview.x) < 1e-9 && Math.abs(q.y - heatPreview.y) < 1e-9,
+                      );
+                    if (c) applyHeatPoint(c);
+                    else applyHeatPoint(heatPreview);
+                  }}
+                >
+                  ✓ 应用该指挥位置
+                </button>
+                <button className="link" onClick={() => setHeatPreview(null)}>
+                  取消预览
+                </button>
+              </div>
+            )}
+            {heatMode && heatStatus === 'computing' && (
+              <div className="heat-computing-hint">⏳ 正在重算指挥站位热区…</div>
             )}
           </div>
           <GraphView scene={scene} analysis={analysis} selectedId={selectedId} onSelect={selectId} />
@@ -306,6 +419,15 @@ export default function App() {
           onUnblockSearch={runUnblockSearch}
           onUnblockPreview={previewUnblock}
           onUnblockApply={applyUnblock}
+          heatMode={heatMode}
+          heatmap={heatmap}
+          heatStatus={heatStatus}
+          heatCellSize={heatCellSize}
+          onHeatCellSize={setHeatCellSize}
+          heatPreview={heatPreview}
+          onHeatPreview={setHeatPreview}
+          onHeatApply={applyHeatPoint}
+          onCloseHeat={toggleHeatMode}
         />
       </main>
     </div>

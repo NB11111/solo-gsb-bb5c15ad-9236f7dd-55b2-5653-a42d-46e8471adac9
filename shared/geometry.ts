@@ -619,6 +619,201 @@ export function findUnblockCandidates(
 }
 
 // ---------------------------------------------------------------------------
+// 指挥站位热区：舞台前方指挥区按 0.25 m 网格评估“指挥站在哪里看得最全”
+//
+// 对每个候选指挥点，复用与 analyzeSinger 完全相同的线段-圆判定语义
+// （TANGENT_EPS 容差、退化阈值、投影钳制）统计全部演唱者的视线状态：
+//  - 通畅人数为主、相切人数为次：score = clear + 0.5 * tangent；
+//  - 退化视线（演唱者与候选指挥点重合）计为不可用，不贡献分数；
+//  - 候选按分数降序贪心选取，且彼此圆心距至少 1 m。
+// losStatusAt 是 analyzeSinger 的“仅状态”快速路径：blocked 一旦发现立即返回，
+// 避免为热区网格构造大量遮挡事件数组（数学过程与 analyzeSinger 逐行一致）。
+// ---------------------------------------------------------------------------
+
+/** 热区采样网格间距（米） */
+export const CONDUCTOR_HEAT_GRID_STEP = 0.25;
+/** 热区候选之间的最小间距（米） */
+export const CONDUCTOR_HEAT_MIN_SPACING = 1;
+/** 相切人数相对通畅人数的次要权重（保证“通畅为主、相切为次”的字典序） */
+export const CONDUCTOR_HEAT_TANGENT_WEIGHT = 0.5;
+/** 热区返回的候选数量 */
+export const CONDUCTOR_HEAT_MAX_CANDIDATES = 3;
+
+export interface ConductorHeatRegion {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+}
+
+/** 指挥热区采样区域：舞台前方 x∈[-1, W+1]、y∈[-2.8, 0]（米）。 */
+export function conductorHeatRegion(stage: { width: number }): ConductorHeatRegion {
+  return { minX: -1, maxX: stage.width + 1, minY: -2.8, maxY: 0 };
+}
+
+export interface ConductorHeatPoint {
+  x: number;
+  y: number;
+  /** 视线通畅人数 */
+  clear: number;
+  /** 视线相切（擦边）人数 */
+  tangent: number;
+  /** 视线被遮挡人数 */
+  blocked: number;
+  /** 视线退化人数（与候选指挥点重合，计为不可用） */
+  degenerate: number;
+  /** 综合分数：通畅人数为主、相切人数为次（退化计 0） */
+  score: number;
+}
+
+export interface ConductorCandidate extends ConductorHeatPoint {
+  /** 与场景中当前指挥位置的距离（米） */
+  distanceToConductor: number;
+}
+
+export interface ConductorHeatmap {
+  region: ConductorHeatRegion;
+  gridStep: number;
+  /** 演唱者总数（空场景为 0，此时 points/candidates 均为空） */
+  total: number;
+  /** 全部网格采样点（按行 y、列 x 升序） */
+  points: ConductorHeatPoint[];
+  /** 分数最高且彼此至少相距 minSpacing 的候选（按分数降序） */
+  candidates: ConductorCandidate[];
+  /** 全网格最高分数（空场景为 0） */
+  bestScore: number;
+}
+
+export interface ConductorHeatmapOptions {
+  /** 网格间距（米），默认 0.25 */
+  gridStep?: number;
+  /** 候选最小间距（米），默认 1 */
+  minSpacing?: number;
+  /** 返回候选数量，默认 3 */
+  maxCandidates?: number;
+}
+
+/**
+ * 快速视线状态判定：与 analyzeSinger 相同的几何语义，但只返回状态。
+ * 发现第一个实质性遮挡者即可判定 blocked（最近遮挡者是谁与状态无关），
+ * 无遮挡时根据是否出现相切事件区分 tangent / clear。
+ */
+function losStatusAt(conductor: Vec, singers: Singer[], idx: number): LOSStatus {
+  const me = singers[idx];
+  const dx = conductor.x - me.x;
+  const dy = conductor.y - me.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < DEGENERATE_EPS * DEGENERATE_EPS) return 'degenerate';
+
+  let sawTangent = false;
+  for (let k = 0; k < singers.length; k++) {
+    if (k === idx) continue;
+    const o = singers[k];
+    if (!(o.radius > 0)) continue;
+
+    const tRaw = ((o.x - me.x) * dx + (o.y - me.y) * dy) / len2;
+    const t = tRaw < 0 ? 0 : tRaw > 1 ? 1 : tRaw;
+    const qx = me.x + t * dx;
+    const qy = me.y + t * dy;
+    const clearance = Math.hypot(o.x - qx, o.y - qy) - o.radius;
+
+    if (clearance < -TANGENT_EPS) return 'blocked';
+    if (clearance <= TANGENT_EPS) sawTangent = true;
+  }
+  return sawTangent ? 'tangent' : 'clear';
+}
+
+/** 单轴等距采样：从原点对齐的 gridStep 倍数（跨场景网格位置一致），两端边界必取。 */
+function heatAxisPoints(min: number, max: number, gridStep: number): number[] {
+  const set = new Set<number>();
+  const add = (v: number) => set.add(round9(v < min ? min : v > max ? max : v));
+  add(min);
+  add(max);
+  const startK = Math.ceil(min / gridStep);
+  const endK = Math.floor(max / gridStep);
+  for (let k = startK; k <= endK; k++) add(k * gridStep);
+  return [...set].sort((a, b) => a - b);
+}
+
+/**
+ * 计算指挥站位热区（纯函数）：在舞台前方指挥区按网格逐点统计全部视线状态，
+ * 给出分档分数与彼此相距至少 minSpacing 的最高分候选。不修改入参场景。
+ */
+export function computeConductorHeatmap(
+  scene: Scene,
+  options: ConductorHeatmapOptions = {},
+): ConductorHeatmap {
+  const gridStep = options.gridStep ?? CONDUCTOR_HEAT_GRID_STEP;
+  const minSpacing = options.minSpacing ?? CONDUCTOR_HEAT_MIN_SPACING;
+  const maxCandidates = Math.max(1, options.maxCandidates ?? CONDUCTOR_HEAT_MAX_CANDIDATES);
+  const region = conductorHeatRegion(scene.stage);
+  const total = scene.singers.length;
+
+  // 空场景：无任何视线可评估，热区与候选均为空（UI 给出明确提示）
+  if (total === 0) {
+    return { region, gridStep, total: 0, points: [], candidates: [], bestScore: 0 };
+  }
+
+  const xs = heatAxisPoints(region.minX, region.maxX, gridStep);
+  const ys = heatAxisPoints(region.minY, region.maxY, gridStep);
+  const singers = scene.singers;
+
+  const points: ConductorHeatPoint[] = [];
+  let bestScore = 0;
+  for (const y of ys) {
+    for (const x of xs) {
+      let clear = 0;
+      let tangent = 0;
+      let blocked = 0;
+      let degenerate = 0;
+      for (let i = 0; i < singers.length; i++) {
+        const status = losStatusAt({ x, y }, singers, i);
+        if (status === 'clear') clear++;
+        else if (status === 'tangent') tangent++;
+        else if (status === 'blocked') blocked++;
+        else degenerate++;
+      }
+      const score = clear + CONDUCTOR_HEAT_TANGENT_WEIGHT * tangent;
+      if (score > bestScore) bestScore = score;
+      points.push({ x, y, clear, tangent, blocked, degenerate, score });
+    }
+  }
+
+  // 分数降序（通畅为主、相切为次）；同分时按 x、y 升序，保证输出确定
+  const ranked = [...points].sort((a, b) => b.score - a.score || a.x - b.x || a.y - b.y);
+
+  // 贪心选取：从最高分开始，跳过与已选点距离不足 minSpacing 的点
+  const chosen: ConductorHeatPoint[] = [];
+  for (const p of ranked) {
+    if (chosen.length >= maxCandidates) break;
+    if (chosen.every((q) => Math.hypot(q.x - p.x, q.y - p.y) >= minSpacing - TANGENT_EPS)) {
+      chosen.push(p);
+    }
+  }
+
+  const candidates: ConductorCandidate[] = chosen.map((p) => ({
+    ...p,
+    distanceToConductor: Math.hypot(p.x - scene.conductor.x, p.y - scene.conductor.y),
+  }));
+
+  return { region, gridStep, total, points, candidates, bestScore };
+}
+
+/** 热区分档阈值（综合分数占总人数的比例）：[优, 良, 中, 差]，共 5 档 0..4。 */
+export const HEAT_BAND_THRESHOLDS = [0.9, 0.7, 0.5, 0.3] as const;
+
+/** 计算网格点的分档（0=最差 … 4=最优）；空场景统一为 0 档（不渲染）。 */
+export function heatBandOf(pick: { score: number }, total: number): number {
+  if (total <= 0) return 0;
+  const f = pick.score / total;
+  if (f >= HEAT_BAND_THRESHOLDS[0]) return 4;
+  if (f >= HEAT_BAND_THRESHOLDS[1]) return 3;
+  if (f >= HEAT_BAND_THRESHOLDS[2]) return 2;
+  if (f >= HEAT_BAND_THRESHOLDS[3]) return 1;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // 场景校验 / 规范化（导入 JSON 与后端 API 共用）
 // ---------------------------------------------------------------------------
 

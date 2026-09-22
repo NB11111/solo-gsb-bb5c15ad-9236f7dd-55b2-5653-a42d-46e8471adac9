@@ -754,6 +754,310 @@ button.link {
   pointer-events: none;
 }
 
+/* ---- 指挥站位热区 ---- */
+button.heat-toggle {
+  background: #2b2350;
+  border-color: #4a3a8a;
+}
+
+button.heat-toggle.active {
+  background: #3b2f7a;
+  border-color: #7c5cff;
+  box-shadow: 0 0 0 1px rgba(124, 92, 255, 0.4);
+}
+
+.heat-cell {
+  stroke: none;
+  shape-rendering: crispEdges;
+}
+
+.heat-cell.hb-0 {
+  fill: rgba(239, 68, 68, 0.26);
+}
+
+.heat-cell.hb-1 {
+  fill: rgba(249, 115, 22, 0.28);
+}
+
+.heat-cell.hb-2 {
+  fill: rgba(234, 179, 8, 0.28);
+}
+
+.heat-cell.hb-3 {
+  fill: rgba(132, 204, 22, 0.3);
+}
+
+.heat-cell.hb-4 {
+  fill: rgba(34, 197, 94, 0.32);
+}
+
+.heat-empty-label {
+  fill: #c4b5fd;
+  font-size: 0.32px;
+  font-weight: 600;
+}
+
+.heat-cand-marker {
+  cursor: pointer;
+}
+
+.heat-cand-dot {
+  fill: rgba(124, 92, 255, 0.35);
+  stroke: #a78bfa;
+  stroke-width: 0.035;
+}
+
+.heat-cand-marker.active .heat-cand-dot {
+  fill: rgba(124, 92, 255, 0.85);
+  stroke: #fff;
+  stroke-width: 0.05;
+}
+
+.heat-cand-num {
+  fill: #fff;
+  font-size: 0.22px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.heat-ghost-body {
+  fill: rgba(124, 92, 255, 0.75);
+  stroke: #fff;
+  stroke-width: 0.03;
+  stroke-dasharray: 0.09 0.06;
+}
+
+.heat-ghost-label {
+  fill: #c4b5fd;
+  font-size: 0.28px;
+  text-anchor: middle;
+}
+
+.conductor.dimmed {
+  opacity: 0.35;
+}
+
+.heat-preview-los {
+  opacity: 0.8;
+}
+
+.heat-deg-mark {
+  fill: var(--degenerate);
+  stroke: #fff;
+  stroke-width: 0.02;
+}
+
+.heat-preview-bar {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(20, 16, 45, 0.92);
+  border: 1px solid #7c5cff;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: #dcd4ff;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 92%;
+}
+
+.heat-apply-btn {
+  background: #14532d;
+  border-color: #1e7a44;
+  padding: 4px 12px;
+}
+
+.heat-computing-hint {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  background: rgba(20, 16, 45, 0.85);
+  border: 1px solid #4a3a8a;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #c4b5fd;
+  pointer-events: none;
+}
+
+/* 侧栏热区面板 */
+.heat-panel {
+  border-color: #4a3a8a;
+  background: #17142a;
+}
+
+.heat-panel h3 {
+  display: flex;
+  align-items: center;
+  color: #c4b5fd;
+}
+
+.heat-close {
+  margin-left: auto;
+  padding: 1px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.heat-rule {
+  line-height: 1.5;
+}
+
+.heat-scale {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0;
+}
+
+.heat-status {
+  font-size: 12px;
+  color: #c4b5fd;
+  margin: 6px 0;
+}
+
+.heat-empty {
+  font-size: 12.5px;
+  color: #f0abfc;
+  background: rgba(240, 171, 252, 0.08);
+  border: 1px solid rgba(240, 171, 252, 0.3);
+  border-radius: 6px;
+  padding: 8px 10px;
+  line-height: 1.5;
+  margin: 6px 0 0;
+}
+
+.heat-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0;
+}
+
+.heat-cand-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.heat-cand-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  background: #1d1b33;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.heat-cand-list li:hover {
+  background: #25214a;
+}
+
+.heat-cand-list li.selected {
+  border-color: #7c5cff;
+  background: #241f4d;
+}
+
+.heat-cand-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.heat-cand-pos {
+  font-weight: 600;
+}
+
+.heat-cand-detail {
+  font-size: 11.5px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.hstat {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-left: 8px;
+}
+
+.hstat.clear {
+  background: var(--clear);
+  margin-left: 0;
+}
+
+.hstat.tangent {
+  background: var(--tangent);
+}
+
+.hstat.blocked {
+  background: var(--blocked);
+}
+
+.hstat.degenerate {
+  background: var(--degenerate);
+}
+
+.heat-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--panel-border);
+}
+
+.heat-legend-item {
+  font-size: 11px;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+}
+
+.hsq {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+  margin-right: 4px;
+}
+
+.hsq.hb-0 {
+  background: rgba(239, 68, 68, 0.6);
+}
+
+.hsq.hb-1 {
+  background: rgba(249, 115, 22, 0.6);
+}
+
+.hsq.hb-2 {
+  background: rgba(234, 179, 8, 0.6);
+}
+
+.hsq.hb-3 {
+  background: rgba(132, 204, 22, 0.6);
+}
+
+.hsq.hb-4 {
+  background: rgba(34, 197, 94, 0.65);
+}
+
 /* ---- 遮挡关系图谱 ---- */
 .graph-panel {
   border-top: 1px solid var(--panel-border);

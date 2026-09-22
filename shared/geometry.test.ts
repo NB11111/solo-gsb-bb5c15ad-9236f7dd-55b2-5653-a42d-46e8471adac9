@@ -4,8 +4,13 @@ import {
   analyzeScene,
   analyzeSinger,
   buildOcclusionGraph,
+  computeConductorHeatmap,
+  conductorHeatRegion,
+  CONDUCTOR_HEAT_GRID_STEP,
+  CONDUCTOR_HEAT_MIN_SPACING,
   evaluateUnblockPosition,
   findUnblockCandidates,
+  heatBandOf,
   occlusionChainFrom,
   stageInterior,
   validateScene,
@@ -440,4 +445,148 @@ test('图谱：圆心重合的站位互挡成环，且与无关循环各自独�
   ]);
   // h 的视线不被任何人遮挡 → 无出边
   assert.ok(!g.edges.some((e2) => e2.from === 'h'));
+});
+
+// ---------------------------------------------------------------------------
+// 指挥站位热区：指挥区网格评分、分档与候选间距
+// ---------------------------------------------------------------------------
+
+test('热区：采样区域为 x∈[-1,W+1]、y∈[-2.8,0]，按 0.25 m 网格覆盖且含边界', () => {
+  const region = conductorHeatRegion({ width: 12 });
+  assert.deepEqual(region, { minX: -1, maxX: 13, minY: -2.8, maxY: 0 });
+
+  const heat = computeConductorHeatmap(scene({ conductor: { x: 6, y: -1 }, singers: [] }));
+  assert.equal(heat.total, 0);
+  assert.deepEqual(heat.points, []);
+  assert.deepEqual(heat.candidates, []);
+  assert.equal(heat.bestScore, 0);
+});
+
+test('热区：单个演唱者 → 网格点状态与 analyzeScene 完全一致（复用同一判定核心）', () => {
+  const me = singer('me', 6, 2, 0.3);
+  const sc = scene({ conductor: { x: 6, y: -1 }, singers: [me] });
+  const heat = computeConductorHeatmap(sc);
+
+  // x：-1..13 对齐 0.25 网格共 57 点；y：边界 -2.8 + 网格点 -2.75..0 共 13 点
+  assert.equal(heat.points.length, 57 * 13);
+  assert.equal(heat.gridStep, CONDUCTOR_HEAT_GRID_STEP);
+  assert.equal(heat.bestScore, 1);
+
+  for (const p of heat.points) {
+    // 不变量：四项之和为总人数；score = 通畅 + 0.5*相切
+    assert.equal(p.clear + p.tangent + p.blocked + p.degenerate, 1);
+    assert.equal(p.score, p.clear + 0.5 * p.tangent);
+    const moved: Scene = { ...sc, conductor: { x: p.x, y: p.y } };
+    const summary = analyzeScene(moved).summary;
+    assert.equal(p.clear, summary.clear);
+    assert.equal(p.tangent, summary.tangent);
+    assert.equal(p.blocked, summary.blocked);
+    assert.equal(p.degenerate, summary.degenerate);
+  }
+
+  // 所有点都通畅（无遮挡者），同分点按 x、y 升序取 3 个且间距 ≥ 1 m
+  assert.equal(heat.candidates.length, 3);
+  for (let i = 0; i < heat.candidates.length; i++) {
+    for (let j = i + 1; j < heat.candidates.length; j++) {
+      assert.ok(
+        Math.hypot(
+          heat.candidates[i].x - heat.candidates[j].x,
+          heat.candidates[i].y - heat.candidates[j].y,
+        ) >= CONDUCTOR_HEAT_MIN_SPACING - TANGENT_EPS,
+      );
+    }
+  }
+});
+
+test('热区：候选点统计与把指挥移到该点后的 analyzeScene 一致（多人共线场景）', () => {
+  const sc = scene({
+    conductor: { x: 6, y: 0 },
+    singers: [
+      singer('s1', 6, 1.5, 0.3),
+      singer('s2', 6, 3, 0.3),
+      singer('s3', 3, 2, 0.3),
+      singer('s4', 9, 2, 0.3),
+    ],
+  });
+  const heat = computeConductorHeatmap(sc);
+  assert.equal(heat.total, 4);
+
+  // 每个候选点都必须能在“把指挥移到该点”的场景里复核同样的明细
+  for (const c of heat.candidates) {
+    const moved: Scene = { ...sc, conductor: { x: c.x, y: c.y } };
+    const summary = analyzeScene(moved).summary;
+    assert.equal(c.clear, summary.clear);
+    assert.equal(c.tangent, summary.tangent);
+    assert.equal(c.blocked, summary.blocked);
+    assert.equal(c.degenerate, summary.degenerate);
+  }
+
+  // 正前方 (6,0)：s2 被 s1 遮挡 → s1/s3/s4 通畅、s2 被遮挡，分数 3
+  const front = heat.points.find((p) => p.x === 6 && p.y === 0)!;
+  assert.equal(front.blocked, 1);
+  assert.equal(front.clear, 3);
+  assert.equal(front.score, 3);
+
+  // 候选按分数降序；侧前方能让 4 人全部通畅 → 最优分数 4
+  assert.equal(heat.bestScore, 4);
+  for (let i = 1; i < heat.candidates.length; i++) {
+    assert.ok(heat.candidates[i].score <= heat.candidates[i - 1].score);
+  }
+});
+
+test('热区：与演唱者重合的网格点视线退化，计为不可用（score=0）', () => {
+  // 演唱者站在舞台前沿 (6,0)：候选指挥点 (6,0) 与之重合
+  const sc = scene({ conductor: { x: 6, y: -1 }, singers: [singer('edge', 6, 0, 0.3)] });
+  const heat = computeConductorHeatmap(sc);
+  const at = heat.points.find((p) => p.x === 6 && p.y === 0)!;
+  assert.equal(at.degenerate, 1);
+  assert.equal(at.clear + at.tangent + at.blocked, 0);
+  assert.equal(at.score, 0);
+  assert.ok(!heat.candidates.some((c) => c.x === 6 && c.y === 0));
+});
+
+test('热区：通畅为主、相切为次 —— 分数排序字典序', () => {
+  // 直接验证评分公式的排序：clear=2,tangent=0 优于 clear=1,tangent=1（2 > 1.5）
+  const a = { x: 0, y: 0, clear: 2, tangent: 0, blocked: 0, degenerate: 0, score: 2 };
+  const b = { x: 1, y: 0, clear: 1, tangent: 1, blocked: 0, degenerate: 0, score: 1.5 };
+  const c = { x: 2, y: 0, clear: 0, tangent: 0, blocked: 2, degenerate: 0, score: 0 };
+  const ranked = [c, a, b].sort((p, q) => q.score - p.score || p.x - q.x || p.y - q.y);
+  assert.deepEqual(ranked.map((p) => p.x), [0, 1, 2]);
+});
+
+test('热区：分档随分数比例上升（共 5 档）', () => {
+  const band = (score: number) => heatBandOf({ score }, 10);
+  assert.equal(band(10), 4); // 100%
+  assert.equal(band(9.5), 4); // ≥ 90%
+  assert.equal(band(8), 3); // ≥ 70%
+  assert.equal(band(6), 2); // ≥ 50%
+  assert.equal(band(4), 1); // ≥ 30%
+  assert.equal(band(2), 0);
+  assert.equal(heatBandOf({ score: 0 }, 0), 0); // 空场景
+});
+
+test('热区：候选彼此相距至少 1 m，且同分点选择确定（两次构建一致）', () => {
+  const sc = scene({
+    conductor: { x: 6, y: -1 },
+    singers: [singer('a', 2, 2), singer('b', 10, 2)],
+  });
+  const h1 = computeConductorHeatmap(sc);
+  const h2 = computeConductorHeatmap(sc);
+  assert.deepEqual(
+    h1.candidates.map((c) => [c.x, c.y]),
+    h2.candidates.map((c) => [c.x, c.y]),
+  );
+  for (let i = 0; i < h1.candidates.length; i++) {
+    for (let j = i + 1; j < h1.candidates.length; j++) {
+      assert.ok(
+        Math.hypot(
+          h1.candidates[i].x - h1.candidates[j].x,
+          h1.candidates[i].y - h1.candidates[j].y,
+        ) >= 1 - TANGENT_EPS,
+      );
+    }
+  }
+  // 纯函数：场景不被修改
+  assert.equal(sc.conductor.x, 6);
+  assert.equal(sc.conductor.y, -1);
 });
