@@ -130,11 +130,322 @@ button.danger:hover {
   display: flex;
 }
 
+.stage-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.stage-canvas.heat-mode.pannable .stage {
+  cursor: grabbing;
+}
+
 .stage {
   width: 100%;
   height: 100%;
   touch-action: none;
   user-select: none;
+}
+
+/* ---- 指挥站位热区 ---- */
+.heat-cell {
+  stroke: rgba(255, 255, 255, 0.06);
+  stroke-width: 0.008;
+}
+
+.heat-cell.active {
+  stroke: #fff;
+  stroke-width: 0.05;
+}
+
+.heat-zone-rect {
+  fill: none;
+  stroke: rgba(79, 140, 255, 0.75);
+  stroke-width: 0.04;
+  stroke-dasharray: 0.22 0.14;
+}
+
+.heat-zone-label {
+  fill: #9cc0ff;
+  font-size: 0.26px;
+}
+
+.heat-cand {
+  cursor: pointer;
+}
+
+.heat-cand-dot {
+  fill: rgba(255, 209, 102, 0.22);
+  stroke: #ffd166;
+  stroke-width: 0.035;
+}
+
+.heat-cand.active .heat-cand-dot {
+  fill: rgba(255, 209, 102, 0.75);
+  stroke: #fff;
+  stroke-width: 0.06;
+}
+
+.heat-cand-num {
+  fill: #fff;
+  font-size: 0.22px;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.heat-preview-link {
+  stroke: #ffd166;
+  stroke-width: 0.03;
+  stroke-dasharray: 0.12 0.09;
+  opacity: 0.85;
+}
+
+.heat-preview-ring {
+  fill: rgba(255, 209, 102, 0.1);
+  stroke: #ffd166;
+  stroke-width: 0.04;
+  stroke-dasharray: 0.12 0.08;
+}
+
+.heat-preview-body {
+  fill: rgba(255, 209, 102, 0.35);
+  stroke: #ffd166;
+  stroke-width: 0.04;
+}
+
+.heat-preview-label {
+  fill: #ffe8a3;
+  font-size: 0.24px;
+  text-anchor: middle;
+}
+
+.conductor.dimmed .conductor-body {
+  opacity: 0.35;
+}
+
+.conductor.dimmed .conductor-label {
+  opacity: 0.4;
+}
+
+/* 热区缩放控件 */
+.heat-zoom {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(15, 20, 32, 0.85);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.heat-zoom button {
+  padding: 2px 9px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.heat-zoom input[type='range'] {
+  width: 110px;
+  accent-color: var(--accent);
+}
+
+.heat-zoom-value {
+  min-width: 38px;
+  text-align: right;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.heat-zoom-reset {
+  font-size: 11px !important;
+  padding: 2px 8px !important;
+}
+
+.heat-zoom-hint {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 空场景遮罩提示 */
+.heat-empty-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.heat-empty-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(26, 33, 48, 0.92);
+  border: 1px dashed #7f5a1d;
+  border-radius: 10px;
+  padding: 16px 22px;
+  max-width: 380px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.heat-empty-card b {
+  color: var(--tangent);
+  font-size: 14px;
+}
+
+/* ---- 热区侧栏面板 ---- */
+.heat-panel {
+  border-color: #7a6320;
+}
+
+.heat-rule {
+  line-height: 1.55;
+}
+
+.heat-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin: 4px 0 8px;
+}
+
+.heat-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.heat-swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.heat-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin: 4px 0 8px;
+  line-height: 1.5;
+}
+
+.heat-empty {
+  font-size: 12px;
+  margin: 6px 0 0;
+  padding: 7px 9px;
+  border-radius: 5px;
+  line-height: 1.55;
+}
+
+.heat-empty.error {
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.heat-cand-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.heat-cand-list > li {
+  background: #1d2536;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 7px 9px;
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.heat-cand-list > li.selected {
+  border-color: #ffd166;
+  background: #2c2a1d;
+}
+
+.heat-cand-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.heat-cand-pos {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.heat-score {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tier-text-0 { color: var(--degenerate); }
+.tier-text-1 { color: #f87171; }
+.tier-text-2 { color: #fb923c; }
+.tier-text-3 { color: #facc15; }
+.tier-text-4 { color: #a3e635; }
+.tier-text-5 { color: var(--clear); }
+
+.heat-cand-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.hstat {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.hstat.clear { background: rgba(34, 197, 94, 0.18); color: var(--clear); }
+.hstat.tangent { background: rgba(245, 158, 11, 0.18); color: var(--tangent); }
+.hstat.blocked { background: rgba(239, 68, 68, 0.18); color: var(--blocked); }
+.hstat.degenerate { background: rgba(148, 163, 184, 0.18); color: var(--degenerate); }
+
+.heat-cand-detail {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.heat-cand-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+button.heat-toggle {
+  border-color: #7a6320;
+  color: #ffd166;
+}
+
+button.heat-toggle.active {
+  background: #4a3d14;
+  border-color: #ffd166;
 }
 
 .stage-bg {

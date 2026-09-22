@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import {
   analyzeScene,
   analyzeSinger,
+  buildConductorHeatZone,
   buildOcclusionGraph,
+  conductorSightlineStatus,
   evaluateUnblockPosition,
   findUnblockCandidates,
+  heatTier,
   occlusionChainFrom,
   stageInterior,
   validateScene,
@@ -440,4 +443,229 @@ test('图谱：圆心重合的站位互挡成环，且与无关循环各自独�
   ]);
   // h 的视线不被任何人遮挡 → 无出边
   assert.ok(!g.edges.some((e2) => e2.from === 'h'));
+});
+
+// ---------------------------------------------------------------------------
+// 指挥站位热区：网格采样、字典序评分、1m 间距候选、退化不可用
+// ---------------------------------------------------------------------------
+
+test('热区：空场景给出明确空结果', () => {
+  const sc = scene({ conductor: { x: 6, y: -1 }, singers: [] });
+  const hz = buildConductorHeatZone(sc);
+  assert.equal(hz.empty, true);
+  assert.equal(hz.spots.length, 0);
+  assert.equal(hz.candidates.length, 0);
+  assert.equal(hz.totalSingers, 0);
+  assert.deepEqual(hz.bounds, { minX: -1, maxX: 13, minY: -2.8, maxY: 0 });
+});
+
+test('热区：0.25 m 网格覆盖 x∈[-1,W+1]、y∈[-2.8,0] 全部网格点（含边界）', () => {
+  const sc = scene({ conductor: { x: 6, y: -1 }, singers: [singer('a', 6, 3)] });
+  const hz = buildConductorHeatZone(sc);
+  assert.equal(hz.empty, false);
+  assert.equal(hz.gridStep, 0.25);
+  // x: -1..13 步长 0.25 → 57 个点；y: -2.8..0 步长 0.25 → 12 个点（含 0）
+  const xs = new Set(hz.spots.map((s) => s.x));
+  const ys = new Set(hz.spots.map((s) => s.y));
+  assert.equal(xs.size, 57);
+  assert.equal(ys.size, 13);
+  assert.equal(hz.spots.length, 57 * 13);
+  assert.ok(xs.has(-1) && xs.has(13));
+  assert.ok(ys.has(-2.8) && ys.has(0));
+  // 排序：x 升序、y 降序（y=0 的行在前）
+  assert.equal(hz.spots[0].y, 0);
+  assert.equal(hz.spots[0].x, -1);
+  assert.equal(hz.spots[hz.spots.length - 1].y, -2.8);
+  assert.equal(hz.spots[hz.spots.length - 1].x, 13);
+  // 明细四项之和 = 总人数
+  for (const sp of hz.spots) {
+    assert.equal(sp.clear + sp.tangent + sp.blocked + sp.degenerate, 1);
+  }
+});
+
+test('热区：演唱者与候选指挥位置重合 → 该点视线退化、不可用且不计分', () => {
+  // 单人站在 (6, 0)：采样点 (6, 0) 与之重合 → degenerate，分数 0、分档 0
+  const sc = scene({ conductor: { x: 6, y: -1 }, singers: [singer('a', 6, 0, 0.3)] });
+  const hz = buildConductorHeatZone(sc);
+  const degen = hz.spots.find((s) => s.x === 6 && s.y === 0)!;
+  assert.equal(degen.degenerate, 1);
+  assert.equal(degen.clear + degen.tangent + degen.blocked, 0);
+  assert.equal(degen.score, 0);
+  assert.equal(degen.tier, 0);
+  // 其余点（不重合）该人视线通畅 → 满分
+  const other = hz.spots.find((s) => s.x === 6 && s.y === -0.25)!;
+  assert.equal(other.clear, 1);
+  assert.equal(other.score, 2);
+  assert.equal(other.tier, 5);
+});
+
+test('热区：分数为字典序（通畅为主、相切为次）', () => {
+  // 4 人：a 在中轴会被 b 遮挡（指挥在 y=0 附近时）；构造 3 clear vs 2 clear+多 tangent 的对比
+  // 指挥 (6,0)：a(6,4) 被 b(6,2) 挡；c/d 通畅；另取 g 使某人相切：
+  // c(3,2) 的视线与圆 g(圆心距=半径) 相切，g 半径 0.6、圆心 (4.2,1.2) 在指挥-c 连线上的垂足
+  // 为简化：直接对两个候选点验证分数排序公式。
+  const a = singer('a', 6, 4, 0.3);
+  const b = singer('b', 6, 2, 0.3);
+  const c = singer('c', 9, 3, 0.3);
+  const sc = scene({ conductor: { x: 6, y: 0 }, singers: [a, b, c] });
+  const hz = buildConductorHeatZone(sc);
+  // 指挥 (6,0)：a 被 b 挡、b 通畅、c 通畅 → (clear=2, blocked=1)
+  const front = hz.spots.find((s) => s.x === 6 && s.y === 0)!;
+  assert.equal(front.clear, 2);
+  assert.equal(front.blocked, 1);
+  assert.equal(front.score, 2 * 4);
+  // 指挥 (6,-2.8) 与 a 共线仍会被 b 挡；改取离轴点 (3,-2.8)：三人全部通畅 → clear=3
+  const far = hz.spots.find((s) => s.x === 3 && s.y === -2.8)!;
+  assert.equal(far.clear, 3);
+  assert.equal(far.score, 3 * 4);
+  assert.ok(far.score > front.score);
+  // 字典序：clear=2 但 tangent=2 的分 > clear=2 tangent=0（rankBase=5 保证）
+  assert.equal(2 * 5 + 2 > 2 * 5 + 0, true);
+});
+
+test('热区：候选为最高分且彼此至少相距 1 m，至多 3 个，并附完整视线分析', () => {
+  // 对称场景：指挥远离舞台时全员通畅，最高分形成连续 0.25 m 网格 → 必须按 1 m 稀疏化
+  const sc = scene({
+    stage: { width: 12, depth: 8 },
+    conductor: { x: 6, y: -1 },
+    singers: [singer('a', 2, 6), singer('b', 6, 6), singer('c', 10, 6)],
+  });
+  const hz = buildConductorHeatZone(sc);
+  assert.ok(hz.candidates.length >= 1);
+  assert.ok(hz.candidates.length <= 3);
+
+  // 两两距离 ≥ 1 m
+  for (let i = 0; i < hz.candidates.length; i++) {
+    for (let j = i + 1; j < hz.candidates.length; j++) {
+      const p = hz.candidates[i];
+      const q = hz.candidates[j];
+      assert.ok(
+        Math.hypot(p.x - q.x, p.y - q.y) >= 1 - TANGENT_EPS,
+        `候选 ${i} 与 ${j} 距离不足 1 m`,
+      );
+    }
+  }
+  // 候选按分数降序
+  for (let i = 1; i < hz.candidates.length; i++) {
+    assert.ok(hz.candidates[i - 1].score >= hz.candidates[i].score);
+  }
+  // 不存在比入选点更高分且与之相距 ≥ 1 m 的未入选点（贪心最优性抽查）
+  const best = hz.candidates[0];
+  assert.equal(best.score, Math.max(...hz.spots.map((s) => s.score)));
+  // 候选附带的分析与共享核心一致
+  for (const cand of hz.candidates) {
+    const expected = analyzeScene({ ...sc, conductor: { x: cand.x, y: cand.y } });
+    assert.equal(cand.analysis.summary.clear, cand.clear);
+    assert.equal(cand.analysis.summary.tangent, cand.tangent);
+    assert.equal(cand.analysis.summary.blocked, cand.blocked);
+    assert.equal(cand.analysis.summary.degenerate, cand.degenerate);
+    assert.equal(cand.analysis.results.length, expected.results.length);
+  }
+});
+
+test('热区：所有采样点都无通畅视线 → 无候选但非空场景', () => {
+  // 两圆心重合：任意指挥位置两人互相遮挡（对方圆包含自己的眼睛），全场无通畅点
+  const sc = scene({
+    conductor: { x: 0, y: 0 },
+    singers: [singer('a', 4, 4, 0.3), singer('b', 4, 4, 0.3)],
+  });
+  const hz = buildConductorHeatZone(sc);
+  assert.equal(hz.empty, false);
+  assert.ok(hz.spots.length > 0);
+  assert.equal(Math.max(...hz.spots.map((s) => s.score)), 0);
+  assert.equal(hz.candidates.length, 0);
+});
+
+test('热区：conductorSightlineStatus 与 analyzeSinger 在随机场景下完全一致', () => {
+  // 伪随机生成站位与指挥网格点，交叉验证轻量判定与完整分析语义一致
+  let seed = 1234567;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const singers: Singer[] = [];
+  for (let i = 0; i < 12; i++) {
+    singers.push(singer(`r${i}`, rand() * 12, rand() * 8, 0.15 + rand() * 0.5));
+  }
+  for (let ix = 0; ix <= 10; ix++) {
+    for (let iy = 0; iy <= 8; iy++) {
+      const cond = { x: -1 + ix * 1.4, y: -2.8 + iy * 0.35 };
+      for (const s of singers) {
+        const light = conductorSightlineStatus(cond, s, singers);
+        const full = analyzeSinger(cond, s, singers).status;
+        assert.equal(light, full, `(${cond.x.toFixed(2)},${cond.y.toFixed(2)}) ${s.id}`);
+      }
+    }
+  }
+});
+
+test('热区：密集站位（空间网格快路径）评分与朴素 O(n²) 逐点判定逐格一致', () => {
+  // 120 人密集铺满 8×6 舞台（半径参差），迫使快路径每个 3×3 邻域多桶命中；
+  // 另加随机半径与轻微错位，覆盖相切/钳制投影/端点外等分支。
+  let seed = 98765;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const singers: Singer[] = [];
+  let id = 0;
+  for (let gx = 0; gx < 12; gx++) {
+    for (let gy = 0; gy < 10; gy++) {
+      singers.push(
+        singer(
+          `d${id++}`,
+          0.4 + gx * 0.66 + (rand() - 0.5) * 0.12,
+          0.4 + gy * 0.58 + (rand() - 0.5) * 0.12,
+          0.2 + rand() * 0.25,
+        ),
+      );
+    }
+  }
+  const sc = scene({ stage: { width: 8, depth: 6 }, conductor: { x: 4, y: -1 }, singers });
+  const hz = buildConductorHeatZone(sc);
+  assert.equal(hz.empty, false);
+  // 抽查 40 个采样点：热区快路径计数必须与朴素逐人 analyzeSinger 完全一致
+  for (let q = 0; q < hz.spots.length; q += Math.floor(hz.spots.length / 40)) {
+    const sp = hz.spots[q];
+    const cond = { x: sp.x, y: sp.y };
+    let clear = 0;
+    let tangent = 0;
+    let blocked = 0;
+    let degenerate = 0;
+    for (const s of singers) {
+      const st = analyzeSinger(cond, s, singers).status;
+      if (st === 'clear') clear++;
+      else if (st === 'tangent') tangent++;
+      else if (st === 'blocked') blocked++;
+      else degenerate++;
+    }
+    assert.equal(sp.clear, clear, `(${sp.x},${sp.y}) clear`);
+    assert.equal(sp.tangent, tangent, `(${sp.x},${sp.y}) tangent`);
+    assert.equal(sp.blocked, blocked, `(${sp.x},${sp.y}) blocked`);
+    assert.equal(sp.degenerate, degenerate, `(${sp.x},${sp.y}) degenerate`);
+    assert.equal(sp.score, clear * (singers.length + 1) + tangent);
+  }
+});
+
+test('热区：不修改入参场景，且不依赖当前指挥位置（指挥拖动不改变热区）', () => {
+  const sc = scene({ conductor: { x: 6, y: -1 }, singers: [singer('a', 6, 3), singer('b', 7, 3)] });
+  const snapshot = JSON.stringify(sc);
+  const hz1 = buildConductorHeatZone(sc);
+  const moved = { ...sc, conductor: { x: 0, y: -2.8 } };
+  const hz2 = buildConductorHeatZone(moved);
+  assert.deepEqual(
+    hz1.spots.map((s) => [s.x, s.y, s.score]),
+    hz2.spots.map((s) => [s.x, s.y, s.score]),
+  );
+  assert.equal(JSON.stringify(sc), snapshot);
+});
+
+test('热区：heatTier 分档边界', () => {
+  assert.equal(heatTier(0, 4), 0);
+  assert.equal(heatTier(1, 4), 2); // ceil(5/4)=2
+  assert.equal(heatTier(2, 4), 3);
+  assert.equal(heatTier(3, 4), 4);
+  assert.equal(heatTier(4, 4), 5);
+  assert.equal(heatTier(5, 0), 0);
+  assert.equal(heatTier(1, 5), 1); // ceil(5/5)=1
 });

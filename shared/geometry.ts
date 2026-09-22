@@ -88,6 +88,88 @@ export interface Analysis {
   summary: AnalysisSummary;
 }
 
+/** 视线-圆单次接触检测的复用缓冲（避免热区海量采样时分配对象） */
+interface CircleContact {
+  /** 圆心在线段上的钳制投影参数（0 = 眼睛，1 = 指挥） */
+  t: number;
+  /** 圆心到（钳制后）线段的距离（米） */
+  dist: number;
+  /** 净余量 = dist − 半径；< −ε 遮挡，|.|≤ ε 相切，> ε 无接触 */
+  clearance: number;
+}
+
+/**
+ * 线段-圆相交核心判定（analyzeSinger 与指挥站位热区共用）：
+ * 计算站位圆 o 的圆心到「眼睛 P0 → 指挥」线段的钳制投影与净余量，结果写入 out。
+ */
+function circleContact(
+  p0x: number,
+  p0y: number,
+  dx: number,
+  dy: number,
+  len2: number,
+  o: Singer,
+  out: CircleContact,
+): CircleContact {
+  // 圆心在线段上的投影参数（钳制到 [0,1]，正确处理端点外/包含端点的圆）
+  const tRaw = ((o.x - p0x) * dx + (o.y - p0y) * dy) / len2;
+  const t = tRaw < 0 ? 0 : tRaw > 1 ? 1 : tRaw;
+  const qx = p0x + t * dx;
+  const qy = p0y + t * dy;
+  const dist = Math.hypot(o.x - qx, o.y - qy);
+  out.t = t;
+  out.dist = dist;
+  out.clearance = dist - o.radius;
+  return out;
+}
+
+/**
+ * 轻量视线判定：只返回状态（clear / tangent / blocked / degenerate），
+ * 不构造遮挡事件列表。语义与 analyzeSinger 完全一致（同一套线段-圆判定
+ * 与 TANGENT_EPS），供指挥站位热区与外部复用。
+ */
+export function conductorSightlineStatus(
+  conductor: Vec,
+  singer: Singer,
+  all: Singer[],
+): LOSStatus {
+  const dx = conductor.x - singer.x;
+  const dy = conductor.y - singer.y;
+  const len = Math.hypot(dx, dy);
+  if (len < DEGENERATE_EPS) return 'degenerate';
+  return sightlineStatusFast(singer, dx / len, dy / len, len, all);
+}
+
+/**
+ * 热区热点内循环：调用方已把每位演唱者到候选指挥的方向归一化
+ * （ux,uy）与段长 segLen 算好（每点只归一化一次），这里直接判定。
+ */
+function sightlineStatusFast(
+  singer: Singer,
+  ux: number,
+  uy: number,
+  segLen: number,
+  all: Singer[],
+): LOSStatus {
+  let tangent = false;
+  for (const o of all) {
+    if (o.id === singer.id || !(o.radius > 0)) continue;
+    // 眼睛指向遮挡圆心的向量在视线上的投影长度（钳制到 [0, 视线段长]）
+    const ox = o.x - singer.x;
+    const oy = o.y - singer.y;
+    let along = ox * ux + oy * uy;
+    if (along < 0) along = 0;
+    else if (along > segLen) along = segLen;
+    // 垂直分量 = 圆心向量 − 沿视线投影；其模即圆心到（钳制后）线段的距离
+    const perpX = ox - ux * along;
+    const perpY = oy - uy * along;
+    const clearance = Math.hypot(perpX, perpY) - o.radius;
+    if (clearance < -TANGENT_EPS) return 'blocked';
+    if (clearance <= TANGENT_EPS) tangent = true;
+  }
+  return tangent ? 'tangent' : 'clear';
+}
+
 /** 分析单个演唱者到指挥的视线。 */
 export function analyzeSinger(conductor: Vec, singer: Singer, all: Singer[]): SingerLOS {
   const p0x = singer.x;
@@ -102,17 +184,13 @@ export function analyzeSinger(conductor: Vec, singer: Singer, all: Singer[]): Si
   const len = Math.sqrt(len2);
 
   const occlusions: Occlusion[] = [];
+  const contact: CircleContact = { t: 0, dist: 0, clearance: 0 };
   for (const o of all) {
     if (o.id === singer.id) continue;
     if (!(o.radius > 0)) continue;
 
-    // 圆心在线段上的投影参数（钳制到 [0,1]，正确处理端点外/包含端点的圆）
-    const tRaw = ((o.x - p0x) * dx + (o.y - p0y) * dy) / len2;
-    const t = tRaw < 0 ? 0 : tRaw > 1 ? 1 : tRaw;
-    const qx = p0x + t * dx;
-    const qy = p0y + t * dy;
-    const dist = Math.hypot(o.x - qx, o.y - qy);
-    const clearance = dist - o.radius;
+    circleContact(p0x, p0y, dx, dy, len2, o, contact);
+    const { t, dist, clearance } = contact;
 
     if (clearance < -TANGENT_EPS) {
       // 遮挡：求视线进入圆的参数（线段-圆求交，取较小根并钳制）
@@ -284,6 +362,282 @@ export function occlusionChainFrom(graph: OcclusionGraph, startId: string): Occl
   }
   const cycle = cur !== undefined ? nodes.slice(index.get(cur)!) : undefined;
   return { nodes, edges, cycle };
+}
+
+// ---------------------------------------------------------------------------
+// 指挥站位热区：在舞台前方矩形区域按网格枚举指挥位置，逐点评分
+//
+// 每个采样点（候选指挥位置）对全部演唱者复用 conductorSightlineStatus
+// （与 analyzeSinger 同一套圆-线段判定核心）统计视线：
+//   分数 = 通畅人数 × (总人数 + 1) + 相切人数
+// 即字典序：先比通畅人数（主），相同再比相切人数（次）。被遮挡与退化
+// （演唱者与指挥重合）都不计分——退化视线在该点判为不可用。
+// 候选去重排序后，贪心挑选彼此圆心距 ≥ 1 m 的前 3 个高分点。
+// ---------------------------------------------------------------------------
+
+/** 热区采样配置（舞台前方 x∈[-1, W+1]、y∈[-2.8, 0]，0.25 m 网格） */
+export interface HeatZoneOptions {
+  /** 舞台前方区域的 x 外扩（米），默认 1 */
+  padX?: number;
+  /** 区域前缘（距舞台前沿向前，米），默认 2.8 */
+  frontY?: number;
+  /** 区域后缘（相对舞台前沿 y=0，米），默认 0 */
+  backY?: number;
+  /** 采样网格间距（米），默认 0.25 */
+  gridStep?: number;
+  /** 返回候选数量，默认 3 */
+  maxCandidates?: number;
+  /** 候选之间最小圆心距（米），默认 1 */
+  minSpacing?: number;
+}
+
+export const HEAT_ZONE_DEFAULTS = {
+  padX: 1,
+  frontY: 2.8,
+  backY: 0,
+  gridStep: 0.25,
+  maxCandidates: 3,
+  minSpacing: 1,
+} as const;
+
+/** 热区分档：按通畅人数占比分 5 档（0 = 无任何通畅视线，不可用） */
+export type HeatTier = 0 | 1 | 2 | 3 | 4 | 5;
+
+export interface HeatSpot {
+  x: number;
+  y: number;
+  clear: number;
+  tangent: number;
+  blocked: number;
+  /** 退化视线数量（演唱者与该候选指挥位置重合） */
+  degenerate: number;
+  /** 字典序分数 = clear × (n + 1) + tangent */
+  score: number;
+  /** 通畅占比分档 0~5 */
+  tier: HeatTier;
+}
+
+export interface HeatCandidate {
+  x: number;
+  y: number;
+  clear: number;
+  tangent: number;
+  blocked: number;
+  degenerate: number;
+  score: number;
+  tier: HeatTier;
+  /** 指挥位于该候选点时的完整视线分析（用于候选点击预览全部视线） */
+  analysis: Analysis;
+}
+
+export interface HeatZone {
+  /** 实际采样的区域矩形（米） */
+  bounds: { minX: number; maxX: number; minY: number; maxY: number };
+  gridStep: number;
+  totalSingers: number;
+  /** 全部采样点，按 x 升序、y 降序（舞台前沿在前）排列 */
+  spots: HeatSpot[];
+  /** 分数最高且彼此至少相距 minSpacing 的候选（至多 maxCandidates 个） */
+  candidates: HeatCandidate[];
+  /** 空场景（无演唱者），spots/candidates 均为空 */
+  empty: boolean;
+}
+
+/** 热区分档：按通畅人数占比 ceil(5p) 归入 1~5 档；没有通畅视线为 0 档 */
+export function heatTier(clear: number, total: number): HeatTier {
+  if (total <= 0 || clear <= 0) return 0;
+  return Math.min(5, Math.ceil((5 * clear) / total)) as HeatTier;
+}
+
+/**
+ * 单轴等距网格采样：以 step 的整数倍取点（保证 x 端落在 -1 这类边界、
+ * y 端落在 0），并补入/钳制远端边界（区间长度非整数倍时）。
+ */
+function gridAxis(min: number, max: number, step: number): number[] {
+  const out: number[] = [];
+  const first = Math.ceil(min / step) * step;
+  for (let v = first; v < max - TANGENT_EPS; v += step) {
+    out.push(Math.round(v * 1e6) / 1e6);
+  }
+  out.push(max);
+  if (Math.abs(out[0] - min) > TANGENT_EPS) out.unshift(min);
+  return out;
+}
+
+/**
+ * 指挥站位热区：枚举舞台前方矩形内的全部网格点并评分（纯函数，不修改场景）。
+ * 热区只依赖舞台尺寸与站位（不依赖当前指挥位置），指挥拖动不会使其重算。
+ */
+export function buildConductorHeatZone(scene: Scene, options: HeatZoneOptions = {}): HeatZone {
+  const padX = options.padX ?? HEAT_ZONE_DEFAULTS.padX;
+  const frontY = options.frontY ?? HEAT_ZONE_DEFAULTS.frontY;
+  const backY = options.backY ?? HEAT_ZONE_DEFAULTS.backY;
+  const gridStep = options.gridStep ?? HEAT_ZONE_DEFAULTS.gridStep;
+  const maxCandidates = options.maxCandidates ?? HEAT_ZONE_DEFAULTS.maxCandidates;
+  const minSpacing = options.minSpacing ?? HEAT_ZONE_DEFAULTS.minSpacing;
+
+  const minX = -padX;
+  const maxX = scene.stage.width + padX;
+  // 规范化 -0 → 0（backY 默认 0 时），保证边界值可做严格比较
+  const minY = -Math.max(frontY, backY);
+  const maxY = -Math.min(frontY, backY) || 0;
+  const bounds = { minX, maxX, minY, maxY };
+
+  const singers = scene.singers;
+  const n = singers.length;
+  if (n === 0) {
+    return { bounds, gridStep, totalSingers: 0, spots: [], candidates: [], empty: true };
+  }
+
+  const rankBase = n + 1;
+  // 每位演唱者到候选指挥的方向/段长缓冲：跨全部采样点复用，避免热循环内分配
+  const uxArr = new Float64Array(n);
+  const uyArr = new Float64Array(n);
+  const lenArr = new Float64Array(n);
+  const degen = new Uint8Array(n);
+
+  // 均匀空间网格加速：站位按圆心分桶，cell 边长 = 最大半径。
+  // 某视线可能被半径 r 的圆遮挡时，圆心必在视线段两侧 r 范围内；沿段扫描
+  // 覆盖到的桶即可，人数多时把 O(n²) 降到接近 O(n·视线穿过桶数)。
+  const maxR = singers.reduce((m, s) => (s.radius > m ? s.radius : m), 0);
+  const cell = Math.max(0.25, maxR);
+  let gMinX = Infinity;
+  let gMinY = Infinity;
+  let gMaxX = -Infinity;
+  let gMaxY = -Infinity;
+  for (const s of singers) {
+    if (s.x < gMinX) gMinX = s.x;
+    if (s.y < gMinY) gMinY = s.y;
+    if (s.x > gMaxX) gMaxX = s.x;
+    if (s.y > gMaxY) gMaxY = s.y;
+  }
+  const gCols = Math.max(1, Math.ceil((gMaxX - gMinX) / cell) + 1);
+  const gRows = Math.max(1, Math.ceil((gMaxY - gMinY) / cell) + 1);
+  const buckets: number[][] = Array.from({ length: gCols * gRows }, () => []);
+  const bucketOf = (x: number, y: number) => {
+    const cx = Math.min(gCols - 1, Math.max(0, Math.floor((x - gMinX) / cell)));
+    const cy = Math.min(gRows - 1, Math.max(0, Math.floor((y - gMinY) / cell)));
+    return cy * gCols + cx;
+  };
+  singers.forEach((s, i) => buckets[bucketOf(s.x, s.y)].push(i));
+
+  const evalSpot = (x: number, y: number): HeatSpot => {
+    let clear = 0;
+    let tangent = 0;
+    let blocked = 0;
+    let degenerate = 0;
+    for (let i = 0; i < n; i++) {
+      const s = singers[i];
+      const dx = x - s.x;
+      const dy = y - s.y;
+      const len = Math.hypot(dx, dy);
+      if (len < DEGENERATE_EPS) {
+        degen[i] = 1;
+        continue;
+      }
+      degen[i] = 0;
+      uxArr[i] = dx / len;
+      uyArr[i] = dy / len;
+      lenArr[i] = len;
+    }
+    for (let i = 0; i < n; i++) {
+      if (degen[i]) {
+        degenerate++;
+        continue;
+      }
+      const s = singers[i];
+      const ux = uxArr[i];
+      const uy = uyArr[i];
+      const segLen = lenArr[i];
+
+      // 沿视线从眼睛向指挥按 cell 步进；圆与段距离 ≤ maxR=cell 时，其圆心所在
+      // 桶与“段上同投影点”的桶至多相差 1，因此每步只查 3×3 邻域桶。
+      // 由近及远遇到侵入圆即可立即判定 blocked（相切继续扫，后面可能有遮挡）。
+      let st: LOSStatus = 'clear';
+      const steps = Math.ceil(segLen / cell);
+      let cxPrev = -1;
+      let cyPrev = -1;
+      outer: for (let k = 0; k <= steps; k++) {
+        const along = Math.min(segLen, k * cell);
+        const px = s.x + ux * along;
+        const py = s.y + uy * along;
+        const ccx = Math.min(gCols - 1, Math.max(0, Math.floor((px - gMinX) / cell)));
+        const ccy = Math.min(gRows - 1, Math.max(0, Math.floor((py - gMinY) / cell)));
+        // 同一步可能落在与上一步相同的桶：跳过重复 3×3 扫描
+        if (ccx === cxPrev && ccy === cyPrev) continue;
+        cxPrev = ccx;
+        cyPrev = ccy;
+        for (let dyB = -1; dyB <= 1; dyB++) {
+          const by = ccy + dyB;
+          if (by < 0 || by >= gRows) continue;
+          for (let dxB = -1; dxB <= 1; dxB++) {
+            const bx = ccx + dxB;
+            if (bx < 0 || bx >= gCols) continue;
+            const arr = buckets[by * gCols + bx];
+            for (let q = 0; q < arr.length; q++) {
+              const j = arr[q];
+              if (j === i) continue;
+              const o = singers[j];
+              if (!(o.radius > 0)) continue;
+              const ox = o.x - s.x;
+              const oy = o.y - s.y;
+              let proj = ox * ux + oy * uy;
+              if (proj < 0) proj = 0;
+              else if (proj > segLen) proj = segLen;
+              const perpX = ox - ux * proj;
+              const perpY = oy - uy * proj;
+              const clearance = Math.hypot(perpX, perpY) - o.radius;
+              if (clearance < -TANGENT_EPS) {
+                st = 'blocked';
+                break outer;
+              }
+              if (clearance <= TANGENT_EPS) st = 'tangent';
+            }
+          }
+        }
+      }
+      if (st === 'blocked') blocked++;
+      else if (st === 'tangent') tangent++;
+      else clear++;
+    }
+    return { x, y, clear, tangent, blocked, degenerate, score: clear * rankBase + tangent, tier: heatTier(clear, n) };
+  };
+
+  const xs = gridAxis(minX, maxX, gridStep);
+  const ys = gridAxis(minY, maxY, gridStep);
+  const spots: HeatSpot[] = [];
+  // y 降序：舞台前沿（y=0）在前、前缘（y=-2.8）在后，便于渲染顺序稳定
+  for (let iy = ys.length - 1; iy >= 0; iy--) {
+    for (const x of xs) spots.push(evalSpot(x, ys[iy]));
+  }
+
+  // 候选：按分数降序（同分 x 升序、y 降序，保证确定），贪心取相距 ≥ 1 m 者
+  const ranked = [...spots].sort((a, b) => b.score - a.score || a.x - b.x || b.y - a.y);
+  const picked: HeatSpot[] = [];
+  const minD2 = minSpacing * minSpacing;
+  for (const sp of ranked) {
+    if (picked.length >= maxCandidates) break;
+    let ok = true;
+    for (const p of picked) {
+      const ddx = sp.x - p.x;
+      const ddy = sp.y - p.y;
+      if (ddx * ddx + ddy * ddy < minD2 - TANGENT_EPS) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) picked.push(sp);
+  }
+
+  // 只有分数 > 0（至少一人通畅）的点才是可用候选；被选中的点附上完整分析
+  const candidates: HeatCandidate[] = picked
+    .filter((sp) => sp.score > 0)
+    .map((sp) => ({
+      ...sp,
+      analysis: analyzeScene({ ...scene, conductor: { x: sp.x, y: sp.y } }),
+    }));
+
+  return { bounds, gridStep, totalSingers: n, spots, candidates, empty: false };
 }
 
 // ---------------------------------------------------------------------------

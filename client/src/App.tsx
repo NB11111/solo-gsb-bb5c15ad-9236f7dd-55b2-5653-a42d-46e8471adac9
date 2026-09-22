@@ -1,10 +1,12 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   analyzeScene,
+  buildConductorHeatZone,
   findUnblockCandidates,
   serializeScene,
   validateScene,
   type Analysis,
+  type HeatCandidate,
   type Scene,
   type UnblockCandidate,
 } from '../../shared/geometry';
@@ -36,9 +38,28 @@ export default function App() {
   // 场景版本号：任何编辑都 +1，用于判定自动解遮挡搜索结果是否过期
   const [sceneVersion, setSceneVersion] = useState(0);
   const [unblock, setUnblock] = useState<UnblockState | null>(null);
+  // 指挥站位热区模式：开关状态 + 当前预览候选（null = 不预览，只看不移动指挥）
+  const [heatMode, setHeatMode] = useState(false);
+  const [heatPreviewIndex, setHeatPreviewIndex] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const analysis: Analysis = useMemo(() => analyzeScene(scene), [scene]);
+
+  // 热区只依赖舞台尺寸与站位：添加/移动/删除站位、改半径、导入、载入预设后立即重算；
+  // 故意不依赖 conductor —— 拖动真实指挥不会使热区失效。
+  const heatZone = useMemo(
+    () => (heatMode ? buildConductorHeatZone(scene) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [heatMode, scene.stage.width, scene.stage.depth, scene.singers],
+  );
+  // 热区重算后候选集合可能变化：预览序号越界或不一致时立即取消预览
+  const heatVersion = heatZone?.spots.length ?? -1;
+  useEffect(() => {
+    if (heatPreviewIndex !== null && heatZone && heatPreviewIndex >= heatZone.candidates.length) {
+      setHeatPreviewIndex(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [heatVersion, heatZone]);
 
   /** 使自动解遮挡结果过期（场景被编辑过，候选不再可信）。 */
   const markSceneChanged = () => {
@@ -136,6 +157,27 @@ export default function App() {
     setSelectedId(id);
     // 切换选中对象时收起自动解遮挡面板的预览/结果（结果只对搜索时的演唱者有意义）
     setUnblock((u) => (u && u.singerId !== id ? null : u));
+  };
+
+  // ---- 指挥站位热区：预览只看不移动，确认应用才更新指挥 ----
+  const toggleHeatMode = () => {
+    setHeatMode((m) => {
+      if (m) setHeatPreviewIndex(null);
+      return !m;
+    });
+  };
+
+  const applyHeatCandidate = (candidate: HeatCandidate) => {
+    moveConductor(candidate.x, candidate.y);
+    setHeatPreviewIndex(null);
+    setNotice({
+      kind: 'success',
+      text:
+        `已应用指挥位置（${candidate.x.toFixed(2)}, ${candidate.y.toFixed(2)}）：` +
+        `通畅 ${candidate.clear} / 相切 ${candidate.tangent} / 遮挡 ${candidate.blocked}` +
+        (candidate.degenerate > 0 ? ` / 退化 ${candidate.degenerate}` : '') +
+        '，热区保持开启。',
+    });
   };
 
   const loadPreset = (key: string) => {
@@ -237,6 +279,13 @@ export default function App() {
         <h1>合唱视线遮挡检查台</h1>
         <div className="actions">
           <button onClick={addSingerAuto}>＋ 添加演唱者</button>
+          <button
+            className={heatMode ? 'heat-toggle active' : 'heat-toggle'}
+            onClick={toggleHeatMode}
+            title="在舞台前方按 0.25 m 网格模拟指挥位置并按通畅/相切人数评分"
+          >
+            {heatMode ? '✓ 指挥站位热区：开' : '🛰 指挥站位热区'}
+          </button>
           <select defaultValue="" onChange={(e) => e.target.value && loadPreset(e.target.value)}>
             <option value="" disabled>
               载入预设…
@@ -281,12 +330,14 @@ export default function App() {
               analysis={analysis}
               selectedId={selectedId}
               preview={preview}
+              heat={heatZone ? { zone: heatZone, previewIndex: heatPreviewIndex } : null}
               onSelect={selectId}
               onMoveSinger={moveSinger}
               onMoveConductor={moveConductor}
               onAddSingerAt={addSingerAt}
               onRadiusChange={changeRadius}
               onPreviewCandidate={previewUnblock}
+              onPreviewHeatCandidate={setHeatPreviewIndex}
             />
             {selectedId === CONDUCTOR_ID && (
               <div className="conductor-hint">已选中指挥：拖动调整位置，点击空白处取消选择。</div>
@@ -306,6 +357,10 @@ export default function App() {
           onUnblockSearch={runUnblockSearch}
           onUnblockPreview={previewUnblock}
           onUnblockApply={applyUnblock}
+          heatZone={heatZone}
+          heatPreviewIndex={heatPreviewIndex}
+          onHeatPreview={setHeatPreviewIndex}
+          onHeatApply={applyHeatCandidate}
         />
       </main>
     </div>

@@ -1,7 +1,15 @@
-import type { Analysis, Scene, SingerLOS, UnblockCandidate } from '../../shared/geometry';
+import type {
+  Analysis,
+  HeatCandidate,
+  HeatZone,
+  Scene,
+  SingerLOS,
+  UnblockCandidate,
+} from '../../shared/geometry';
 import { identityColor } from './colors';
 import { CONDUCTOR_ID } from './Stage';
 import { UnblockPanel, type UnblockState } from './UnblockPanel';
+import { HeatmapPanel } from './HeatmapPanel';
 
 interface SidebarProps {
   scene: Scene;
@@ -15,6 +23,11 @@ interface SidebarProps {
   onUnblockSearch: () => void;
   onUnblockPreview: (index: number | null) => void;
   onUnblockApply: (candidate: UnblockCandidate) => void;
+  /** 热区模式开启时传入热区数据与预览序号；null = 普通模式 */
+  heatZone: HeatZone | null;
+  heatPreviewIndex: number | null;
+  onHeatPreview: (index: number | null) => void;
+  onHeatApply: (candidate: HeatCandidate) => void;
 }
 
 const STATUS_LABEL: Record<SingerLOS['status'], string> = {
@@ -52,6 +65,15 @@ export function Sidebar(props: SidebarProps) {
         {summary.degenerate > 0 && <span className="stat degenerate">退化 {summary.degenerate}</span>}
         <span className="stat total">共 {summary.total} 人</span>
       </section>
+
+      {props.heatZone && (
+        <HeatmapPanel
+          zone={props.heatZone}
+          previewIndex={props.heatPreviewIndex}
+          onPreview={props.onHeatPreview}
+          onApply={props.onHeatApply}
+        />
+      )}
 
       {analysis.warnings.length > 0 && (
         <section className="panel warnings">
